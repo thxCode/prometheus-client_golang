@@ -74,6 +74,76 @@ func testDelete(t *testing.T, vec *GaugeVec) {
 	}
 }
 
+func TestDeleteIndexed(t *testing.T) {
+	vec := NewGaugeVec(
+		GaugeOpts{
+			Name: "test",
+			Help: "helpless",
+		},
+		[]string{"l1", "l2"})
+	_ = vec.IndexWith("l2")
+	testDeleteIndexed(t, vec)
+}
+
+func testDeleteIndexed(t *testing.T, vec *GaugeVec) {
+	if got, want := vec.DeleteIndexed(Labels{"l2": "v2"}), false; got != want {
+		// nothing to delete
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	vec.With(Labels{"l1": "v1", "l2": "v2"}).(Gauge).Set(42)
+	if got, want := vec.DeleteIndexed(Labels{"l2": "v2"}), true; got != want {
+		// delete one metric
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.DeleteIndexed(Labels{"l2": "v2"}), false; got != want {
+		// nothing to delete
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	vec.With(Labels{"l1": "v1", "l2": "v2"}).(Gauge).Set(43)
+	vec.With(Labels{"l1": "v1", "l2": "v2"}).(Gauge).Set(44)
+	vec.With(Labels{"l1": "v1", "l2": "v3"}).(Gauge).Set(45)
+	if got, want := vec.DeleteIndexed(Labels{"l2": "v2"}), true; got != want {
+		// delete two metrics
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.DeleteIndexed(Labels{"l2": "v2"}), false; got != want {
+		// nothing to delete as there are not indexed metrics
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.DeleteIndexed(Labels{"l2": "v3"}), true; got != want {
+		// delete one metrics
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	vec.With(Labels{"l1": "v1", "l2": "v2"}).(Gauge).Set(46)
+	vec.With(Labels{"l1": "v1", "l2": "v2"}).(Gauge).Set(47)
+	vec.With(Labels{"l1": "v2", "l2": "v3"}).(Gauge).Set(48)
+	vec.With(Labels{"l1": "v3", "l2": "v3"}).(Gauge).Set(49)
+	vec.With(Labels{"l1": "v1", "l2": "v4"}).(Gauge).Set(50)
+	if got, want := vec.DeleteIndexed(Labels{"l1": "v1"}), false; got != want {
+		// nothing to delete as none indexing
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.Delete(Labels{"l1": "v1", "l2": "v2"}), true; got != want {
+		// delete two metrics, also clean one indexing bucket
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.DeleteIndexed(Labels{"l2": "v2"}), false; got != want {
+		// nothing to delete
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.DeleteIndexed(Labels{"l1": "v2", "l2": "v3"}), true; got != want {
+		// delete two metrics in indexed deleting.
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.Delete(Labels{"l1": "v3", "l2": "v3"}), false; got != want {
+		// nothing to delete
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestDeleteLabelValues(t *testing.T) {
 	vec := NewGaugeVec(
 		GaugeOpts{
@@ -121,6 +191,72 @@ func testDeleteLabelValues(t *testing.T, vec *GaugeVec) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 	if got, want := vec.DeleteLabelValues("v1"), false; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestDeleteIndexedLabelValues(t *testing.T) {
+	vec := NewGaugeVec(
+		GaugeOpts{
+			Name: "test",
+			Help: "helpless",
+		},
+		[]string{"l1", "l2"})
+	_ = vec.IndexWith("l2")
+	testDeleteIndexedLabelValues(t, vec)
+}
+
+func testDeleteIndexedLabelValues(t *testing.T, vec *GaugeVec) {
+	if got, want := vec.DeleteIndexedLabelValues("v2"), false; got != want {
+		// nothing to delete
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	vec.With(Labels{"l1": "v1", "l2": "v2"}).(Gauge).Set(42)
+	if got, want := vec.DeleteIndexedLabelValues("v2"), true; got != want {
+		// delete one metric
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.DeleteIndexedLabelValues("v2"), false; got != want {
+		// nothing to delete
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	vec.With(Labels{"l1": "v1", "l2": "v2"}).(Gauge).Set(43)
+	vec.With(Labels{"l1": "v1", "l2": "v2"}).(Gauge).Set(44)
+	vec.With(Labels{"l1": "v1", "l2": "v3"}).(Gauge).Set(45)
+	if got, want := vec.DeleteIndexedLabelValues("v2"), true; got != want {
+		// delete two metrics
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.DeleteIndexedLabelValues("v2"), false; got != want {
+		// nothing to delete as there are not indexed metrics
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.DeleteIndexedLabelValues("v3"), true; got != want {
+		// delete one metrics
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	vec.With(Labels{"l1": "v1", "l2": "v2"}).(Gauge).Set(46)
+	vec.With(Labels{"l1": "v1", "l2": "v2"}).(Gauge).Set(47)
+	vec.With(Labels{"l1": "v2", "l2": "v3"}).(Gauge).Set(48)
+	vec.With(Labels{"l1": "v3", "l2": "v3"}).(Gauge).Set(49)
+	vec.With(Labels{"l1": "v1", "l2": "v4"}).(Gauge).Set(50)
+	if got, want := vec.DeleteLabelValues("v1", "v2"), true; got != want {
+		// delete two metrics, also clean one indexing bucket
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.DeleteIndexedLabelValues("v2"), false; got != want {
+		// nothing to delete
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.DeleteIndexedLabelValues("v2", "v3"), true; got != want {
+		// delete two metrics in indexed deleting.
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := vec.DeleteLabelValues("v3", "v3"), false; got != want {
+		// nothing to delete
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
