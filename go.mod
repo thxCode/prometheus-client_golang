@@ -1,5 +1,7 @@
 module github.com/prometheus/client_golang
 
+go 1.13
+
 require (
 	github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973
 	github.com/golang/protobuf v1.2.0
