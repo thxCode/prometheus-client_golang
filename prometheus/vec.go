@@ -15,6 +15,7 @@ package prometheus
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/prometheus/common/model"
@@ -54,6 +55,74 @@ func NewMetricVec(desc *Desc, newMetric func(lvs ...string) Metric) *MetricVec {
 		hashAdd:     hashAdd,
 		hashAddByte: hashAddByte,
 	}
+}
+
+// IndexWith returns the MetricVec indexing with the given label names(the label names
+// must match those of the variable labels in Desc). If the MetricVec has been curried,
+// an error will be received.
+func (m *MetricVec) IndexWith(labels ...string) error {
+	if len(labels) == 0 {
+		return nil
+	}
+	if len(m.curry) > 0 {
+		return fmt.Errorf("curried metric vec cannot be indexed")
+	}
+	var labelSeqMap = map[string]int{}
+	for i, label := range m.desc.variableLabels {
+		labelSeqMap[label] = i
+	}
+	var indexingLabelSeqs = make([]int, 0, len(labels))
+	for i, ln := range labels {
+		seq, ok := labelSeqMap[ln]
+		if !ok {
+			return fmt.Errorf("%d unknown label(%s) found during indexing", i, ln)
+		}
+		indexingLabelSeqs = append(indexingLabelSeqs, seq)
+	}
+
+	var indexerKey = strings.Join(labels, ":")
+	var indexer = func(lvs ...string) uint64 { // hashValues
+		var h = hashNew()
+		if len(lvs) == len(m.desc.variableLabels) {
+			for _, seq := range indexingLabelSeqs {
+				h = m.hashAdd(h, lvs[seq])
+				h = m.hashAddByte(h, model.SeparatorByte)
+			}
+		} else {
+			for i := range lvs {
+				h = m.hashAdd(h, lvs[i])
+				h = m.hashAddByte(h, model.SeparatorByte)
+			}
+		}
+		return h
+	}
+	if m.indexers == nil {
+		m.indexers = make(map[string]func(labelValues ...string) uint64)
+	}
+	if m.indexes == nil {
+		m.indexes = make(map[uint64]map[uint64]struct{})
+	}
+	if m.reverseIndexes == nil {
+		m.reverseIndexes = make(map[uint64]map[uint64]struct{})
+	}
+	if _, exist := m.indexers[indexerKey]; exist {
+		return fmt.Errorf("indexer has been created: %s", indexerKey)
+	}
+	m.indexers[indexerKey] = indexer
+	return nil
+}
+
+// DeleteIndexedLabelValues removes the metric where the indexed variable labels are the same
+// as those passed in as labels (same order as the VariableLabels in Desc).
+// It returns true if a metric was deleted.
+func (m *MetricVec) DeleteIndexedLabelValues(lvs ...string) (r bool) {
+	return m.metricMap.deleteByHashWithIndexedLabelValues(lvs)
+}
+
+// DeleteIndexed deletes the metric where the indexed variable labels are the same as those
+// passed in as labels. It returns true if a metric was deleted.
+func (m *MetricVec) DeleteIndexed(labels Labels) bool {
+	return m.metricMap.deleteByHashWithIndexedLabels(labels)
 }
 
 // DeleteLabelValues removes the metric where the variable labels are the same
@@ -294,6 +363,10 @@ type metricMap struct {
 	metrics   map[uint64][]metricWithLabelValues
 	desc      *Desc
 	newMetric func(labelValues ...string) Metric
+
+	indexers       map[string]func(labelValues ...string) uint64
+	indexes        map[uint64]map[uint64]struct{}
+	reverseIndexes map[uint64]map[uint64]struct{}
 }
 
 // Describe implements Collector. It will send exactly one Desc to the provided
@@ -324,6 +397,35 @@ func (m *metricMap) Reset() {
 	}
 }
 
+// deleteByHashWithIndexedLabelValues removes the metric from the hash bucket h with indexed label values.
+func (m *metricMap) deleteByHashWithIndexedLabelValues(lvs []string) (r bool) {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	var rs []bool
+	for _, index := range m.indexers {
+		var indexValue = index(lvs...)
+		for hash := range m.indexes[indexValue] {
+			rs = append(rs, func() bool {
+				if _, ok := m.metrics[hash]; !ok {
+					return false
+				}
+				m.unbindHash(hash, false)
+				delete(m.metrics, hash)
+				return true
+			}())
+		}
+	}
+
+	for i := range rs {
+		r = r || rs[i]
+		if r {
+			break
+		}
+	}
+	return
+}
+
 // deleteByHashWithLabelValues removes the metric from the hash bucket h. If
 // there are multiple matches in the bucket, use lvs to select a metric and
 // remove only that metric.
@@ -343,6 +445,7 @@ func (m *metricMap) deleteByHashWithLabelValues(
 		return false
 	}
 
+	m.unbindHash(h, len(metrics) > 1)
 	if len(metrics) > 1 {
 		old := metrics
 		m.metrics[h] = append(metrics[:i], metrics[i+1:]...)
@@ -351,6 +454,41 @@ func (m *metricMap) deleteByHashWithLabelValues(
 		delete(m.metrics, h)
 	}
 	return true
+}
+
+// deleteByHashWithIndexedLabels removes the metric from the hash bucket h with indexed label.
+func (m *metricMap) deleteByHashWithIndexedLabels(labels Labels) (r bool) {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	var lvs []string
+	for _, k := range m.desc.variableLabels {
+		if v, ok := labels[k]; ok {
+			lvs = append(lvs, v)
+		}
+	}
+	var rs []bool
+	for _, index := range m.indexers {
+		var indexValue = index(lvs...)
+		for hash := range m.indexes[indexValue] {
+			rs = append(rs, func() bool {
+				if _, ok := m.metrics[hash]; !ok {
+					return false
+				}
+				m.unbindHash(hash, false)
+				delete(m.metrics, hash)
+				return true
+			}())
+		}
+	}
+
+	for i := range rs {
+		r = r || rs[i]
+		if r {
+			break
+		}
+	}
+	return
 }
 
 // deleteByHashWithLabels removes the metric from the hash bucket h. If there
@@ -371,6 +509,7 @@ func (m *metricMap) deleteByHashWithLabels(
 		return false
 	}
 
+	m.unbindHash(h, len(metrics) > 1)
 	if len(metrics) > 1 {
 		old := metrics
 		m.metrics[h] = append(metrics[:i], metrics[i+1:]...)
@@ -402,6 +541,7 @@ func (m *metricMap) getOrCreateMetricWithLabelValues(
 		inlinedLVs := inlineLabelValues(lvs, curry)
 		metric = m.newMetric(inlinedLVs...)
 		m.metrics[hash] = append(m.metrics[hash], metricWithLabelValues{values: inlinedLVs, metric: metric})
+		m.bindHash(hash, lvs...)
 	}
 	return metric
 }
@@ -427,6 +567,7 @@ func (m *metricMap) getOrCreateMetricWithLabels(
 		lvs := extractLabelValues(m.desc, labels, curry)
 		metric = m.newMetric(lvs...)
 		m.metrics[hash] = append(m.metrics[hash], metricWithLabelValues{values: lvs, metric: metric})
+		m.bindHash(hash, lvs...)
 	}
 	return metric
 }
@@ -457,6 +598,34 @@ func (m *metricMap) getMetricWithHashAndLabels(
 		}
 	}
 	return nil, false
+}
+
+// bindHash binds the hash with the given label values.
+func (m *metricMap) bindHash(h uint64, lvs ...string) {
+	for _, index := range m.indexers {
+		var indexValue = index(lvs...)
+		if m.reverseIndexes[h] == nil {
+			m.reverseIndexes[h] = map[uint64]struct{}{}
+		}
+		m.reverseIndexes[h][indexValue] = struct{}{}
+		if m.indexes[indexValue] == nil {
+			m.indexes[indexValue] = map[uint64]struct{}{}
+		}
+		m.indexes[indexValue][h] = struct{}{}
+	}
+}
+
+// unbindHash reverses the binding of the hash.
+func (m *metricMap) unbindHash(h uint64, caching bool) {
+	for indexValue := range m.reverseIndexes[h] {
+		delete(m.indexes[indexValue], h)
+		if len(m.indexes[indexValue]) == 0 {
+			delete(m.indexes, indexValue)
+		}
+	}
+	if !caching {
+		delete(m.reverseIndexes, h)
+	}
 }
 
 // findMetricWithLabelValues returns the index of the matching metric or
